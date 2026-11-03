@@ -157,7 +157,8 @@ def load_botsv3(tree):
         r = event_row(e)
         actor = (e.get("userIdentity") or {}).get("userName")
         tech = next((t.technique for t in rules.itertuples()
-                     if t.actor == actor and re.match(t.event_regex, r["eventName"] or "")), None)
+                     if t.actor == actor and (pd.isna(t.source_ip) or t.source_ip == r["sourceIPAddress"])
+                     and re.match(t.event_regex, r["eventName"] or "")), None)
         if tech == "EXCLUDE":
             excluded += 1
             continue
