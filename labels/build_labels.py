@@ -7,6 +7,7 @@
 import csv
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -139,11 +140,44 @@ def load_splunk(tree):
     return rows, skipped
 
 
+def load_botsv3(tree):
+    """Splunk BOTS v3 (Frothly 계정, 2018-08-20 약 6시간)의 CloudTrail.
+
+    data/raw/botsv3/cloudtrail/botsv3_cloudtrail.json: Splunk 저널(rawdata/journal.gz)에서 꺼낸 원본 이벤트.
+    계정 하나의 연속 기록이므로 세션 하나로 둔다. labels/botsv3_rules.csv에 맞는 이벤트는 공격,
+    technique이 EXCLUDE인 이벤트는 뺀다. 나머지는 정상이다.
+    """
+    path = RAW / "botsv3" / "cloudtrail" / "botsv3_cloudtrail.json"
+    if not path.exists():
+        return [], 0
+    rules = pd.read_csv(LABELS / "botsv3_rules.csv")
+    events = sorted(read_json_events(path), key=lambda e: e["eventTime"])
+    rows, excluded = [], 0
+    for i, e in enumerate(events):
+        r = event_row(e)
+        actor = (e.get("userIdentity") or {}).get("userName")
+        tech = next((t.technique for t in rules.itertuples()
+                     if t.actor == actor and re.match(t.event_regex, r["eventName"] or "")), None)
+        if tech == "EXCLUDE":
+            excluded += 1
+            continue
+        is_attack = tech is not None
+        r.update(source="botsv3", source_file=str(path.relative_to(ROOT)), scenario="frothly",
+                 session="botsv3:frothly", seq=i,
+                 attack_id=f"botsv3:{actor}@{r['sourceIPAddress']}:{tech}" if is_attack else None,
+                 is_attack=is_attack, technique=tech,
+                 label_source="botsv3_rule" if is_attack else "botsv3_background",
+                 flags="error_call" if r["errorCode"] else "")
+        rows.append(r)
+    return rows, excluded
+
+
 def main():
     tree = load_label_tree()
     rows = load_stratus(tree)
     splunk_rows, skipped = load_splunk(tree)
-    df = pd.DataFrame(rows + splunk_rows)
+    bots_rows, bots_excluded = load_botsv3(tree)
+    df = pd.DataFrame(rows + splunk_rows + bots_rows)
 
     # 공유 파일의 중복 이벤트 정리: 공격 라벨이 붙은 쪽을 남긴다
     df["event_uid"] = df["session"] + ":" + df["eventID"].fillna(df["seq"].astype(str))
@@ -162,6 +196,7 @@ def main():
     OUT.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUT, index=False, quoting=csv.QUOTE_MINIMAL)
     print(f"saved {OUT.relative_to(ROOT)}: {len(df)} events")
+    print(f"botsv3: {len(bots_rows)} events (excluded {bots_excluded})")
     print("skipped splunk files:")
     for s in skipped:
         print("  ", *s)
