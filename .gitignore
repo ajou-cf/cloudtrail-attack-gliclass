@@ -11,6 +11,8 @@
 .env.development.local
 .env.test.local
 .env.production.local
-
-//dataset folder
+# dataset: 공개하지 않음
 /data/*
+**/stratus/
+*stratus*.json
+*.csv
