@@ -3,13 +3,28 @@
 CloudTrail 원본 로그에서 학습용 윈도우 라벨까지, 라벨이 붙고 바뀌는 규칙을 단계 순서대로 정리한다.
 
 ```
-① 이벤트 라벨        labels/build_labels.py        → data/interim/event_labels.csv
-② 전처리·압축 (A/B)   notebooks/preprocess.ipynb     → data/interim/events_{A,B}.csv
-③ 윈도우 분할·라벨    src/windows.py                 → data/interim/windows_{A,B}_size5_stride1.csv
-④ 라벨 정리 (v2)      notebooks/04_split_v2.ipynb    → data/v2/
-   - 전술 라벨 표, 기법 고치기, 윈도우 라벨 다시 계산, 같은 내용 합치기
-⑤ 문장 변환·분할·k-shot 파일  (04_split_v2 다음 단계, 작업 중)
+라벨 체계            labels/labels.csv              전술·기법 ID, 상위 관계, 라벨 문장, 기본 역할 (기준 파일)
+① 이벤트 라벨        notebooks/01_build_labels.ipynb → data/interim/event_labels.csv   (labels/build_labels.py도 같은 결과)
+② 전처리·압축 (A/B)   notebooks/preprocess.ipynb      → data/interim/events_{A,B}.csv
+③ 윈도우 분할·라벨    notebooks/window.ipynb          → data/interim/windows_{A,B}_size5_stride1.csv
+④ 분할·학습 파일      notebooks/04_split_v2.ipynb     → data/v2/{A,B}_{tactic,technique,both}_k{k}/
+⑤ 파인튜닝            notebooks/finetuning.ipynb
 ```
+
+## 라벨 체계 (`labels/labels.csv`)
+
+모든 노트북이 이 파일 하나를 기준으로 라벨을 읽는다.
+
+| 열 | 내용 |
+|---|---|
+| `label_id` | MITRE 전술(`TA…`)·기법(`T…`) ID 하나가 라벨 하나. 묶은 라벨(`TA0003+TA0004`)은 없다 |
+| `kind` | `tactic` (12) / `technique` (63) / `benign` (1) |
+| `level`, `parent_ids` | `top`/`mid`/`leaf`, 기법의 상위 (상위 기법 또는 전술, `\|` 구분). 상위 기법·전술을 구할 때 쓴다 |
+| `name`, `desc`, `label_text` | 이름, 설명, 모델에 주는 라벨 문장 (`이름: 설명`. Benign은 팀 문장) |
+| `role` | 기본 역할. **숨김 전술 TA0040 Impact, TA0112 Defense Impairment만 `held_out`**, 나머지는 `train`. 개수에 따른 숨김은 분할할 때 정한다 (7절) |
+
+v19 라벨 표(`attack_labels_v19.csv`, 팀이 커밋 `6c06b2f`에서 지움)에서 만들었다. MITRE에 없는 사용자 정의 ID(`T1552.GEN`, `T1485.GEN`, `T1685.SEC`)와 정상 하위 유형(`BEN.*`)은 뺐다.
+이전 팀 라벨 표(전술을 묶은 11개 라벨)를 쓰던 노트북(`02`~`04_split`, `04_split_local`)과 예전 분할(`data/splits/`)은 이 체계와 맞지 않는다. `finetuning.ipynb`는 묶은 라벨이 있으면 멈춘다.
 
 ## 요약: 최종 윈도우 라벨
 
@@ -32,7 +47,7 @@ techniques = ['BENIGN', 'T1078', 'T1078.004']
 | # | 규칙 |
 |---|---|
 | L1 | 전술은 **MITRE 전술 하나가 라벨 하나**다. 묶지 않는다 (TA0001, TA0005를 `TA0001+TA0005`로 합치지 않음). |
-| L2 | 전술은 직접 붙이지 않고 **기법에서 자동으로 구한다** (v19 표의 상위 관계). 기법 하나가 전술 여러 개에 속하면 전부 붙는다 (예: T1078 → TA0001, TA0003, TA0004, TA0005). |
+| L2 | 전술은 직접 붙이지 않고 **기법에서 자동으로 구한다** (`labels.csv`의 상위 관계). 기법 하나가 전술 여러 개에 속하면 전부 붙는다 (예: T1078 → TA0001, TA0003, TA0004, TA0005). |
 | L3 | 기법은 **하위 기법과 그 상위 기법을 함께** 붙인다 (예: T1098.001 → `T1098`, `T1098.001`). 하위 기법이 없으면 그 기법만 붙는다. |
 | L4 | 기법 ID는 **MITRE ID만** 쓴다. 상위 기법으로만 라벨된 데이터는 이벤트를 보고 확실하면 하위 기법으로 고친다 (3절). |
 | L5 | 윈도우 라벨은 윈도우 안 공격 이벤트들의 전술·기법 **합집합**이다 (방식 1). 공격 이벤트가 없으면 `BENIGN`. |
@@ -57,7 +72,7 @@ BOTS v3는 Splunk 인덱스 버킷(`rawdata/journal.gz`)에서 CloudTrail JSON�
 | 열 | 내용 |
 |---|---|
 | `is_attack` | 정상 / 공격 |
-| `technique` | 기법 **1개** (v19 표의 `node_id`) |
+| `technique` | 기법 **1개** (`labels.csv`의 `label_id`) |
 | `tactics` | 기법에서 구한 전술 (1개 이상, `\|` 구분) |
 | `attack_id` | 기법 실행 1회의 ID. 하나의 `attack_id`에는 기법이 항상 하나 |
 | `benign_type` | 정상 하위 유형 `BEN.AUTO` / `BEN.MONITOR` / `BEN.DEPLOY` / `BEN.OPS` (분석용, 분류 라벨 아님) |
@@ -120,7 +135,7 @@ BOTS v3는 Splunk 인덱스 버킷(`rawdata/journal.gz`)에서 CloudTrail JSON�
 
 ## 3. 기법 ID 정리 (`04_split_v2` 1-2번)
 
-기준 표는 v19 라벨 표(`attack_labels_v19.csv`, 팀이 커밋 `6c06b2f`에서 지움. 노트북은 git 기록 `74782a0`에서 읽는다).
+기법 ID는 `labels.csv`에 있는 MITRE ID여야 한다 (없으면 `01_build_labels`가 멈춘다).
 
 **상위 기법 → 하위 기법** (Splunk가 T1078로만 라벨했지만 이벤트로 하위 기법이 분명한 것)
 
@@ -171,19 +186,22 @@ BOTS v3는 Splunk 인덱스 버킷(`rawdata/journal.gz`)에서 CloudTrail JSON�
 
 대표 윈도우는 처음 나온 것(세션, 윈도우 번호 순)이고, 분할 때 그 세션·위치를 쓴다.
 
-결과: A 28,387 → 9,293, B 8,183 → 7,737. 합집합으로 기법이 늘어난 윈도우 A 83, B 46. `{BENIGN, 공격}` A 1.
+결과: A 28,387 → 9,287, B 8,183 → 7,733. 라벨이 합집합으로 바뀐 묶음 A 84, B 46. `{BENIGN, 공격}` A 2. (`window.ipynb`의 `u_tactics`, `u_techniques`, `is_first`)
 
-## 7. 라벨 역할 (`data/v2/labels.csv`)
+## 7. 라벨 역할 (분할할 때, `04_split_v2`)
 
-전술 13개 (MITRE 12 + Benign). 라벨 문장은 v19 표의 `이름: 설명`, Benign은 팀 문장.
+`labels.csv`의 기본 역할에서 시작해 분할 결과에 따라 숨김을 더한다. 결과는 분할 폴더마다 `labels.csv`(역할, 이유, 칸별 개수)와 `data/v2/roles_by_k.csv`에 저장한다.
 
-| 역할 | 전술 | 근거 |
+| 순서 | 규칙 | 이유 (`role_reason`) |
 |---|---|---|
-| 학습 (7) | TA0001 Initial Access, TA0003 Persistence, TA0004 Privilege Escalation, TA0005 Stealth, TA0006 Credential Access, TA0007 Discovery, Benign | 팀 `labels/labels.csv`의 학습 라벨에 속한 전술 |
-| 시험 전용 (6) | TA0112 Defense Impairment, TA0040 Impact, TA0009 Collection | 팀이 숨긴 라벨 (`held_out`) |
-| | TA0010 Exfiltration, TA0002 Execution, TA0008 Lateral Movement | 팀이 제외한 라벨 (`excluded`). 데이터가 적어(B 3~7개) 학습은 못 하지만 지우지 않고 제로샷 평가 |
+| 1 | `labels.csv`에서 `held_out`인 전술(TA0040, TA0112)은 숨김. 붙은 윈도우는 전부 test로 보낸다 (완전한 제로샷) | `held_tactic` |
+| 2 | pool·val·test 중 **한 곳이라도 0개**인 라벨은 숨김 (전술·기법 모두) | `no_pool` / `no_val` / `no_test` |
+| 3 | **pool에 k개가 안 되는 라벨은 그 k에서 숨김** (k마다 다름). 학습 라벨은 항상 k개 이상 | `pool<k` |
+| - | Benign은 항상 학습 | |
 
-팀 원본 `labels/labels.csv`(전술을 묶은 8개 라벨)는 그대로 둔다. 기존 실험(`data/splits/`)이 이 파일을 쓴다.
+- 숨김 라벨은 학습·검증 후보에서 빠지고 시험 후보에만 들어간다.
+- 규칙 2·3으로 숨긴 라벨은 그 윈도우가 pool·val에 남아 있을 수 있다 (정답에서만 빠짐). 그래서 규칙 1처럼 완전한 제로샷은 아니다.
+- k가 커질수록 학습 라벨이 줄어든다 (예: B 전술 k=1은 11개, k=16은 7개, Benign 포함).
 
 **지금 데이터에서 같이 나오는 전술**: TA0001과 TA0005는 항상 같이 나온다 (T1078 계열에서만 나옴). TA0003과 TA0004도 T1136.003 윈도우 1개를 빼면 항상 같이 나온다. 지금 데이터로는 둘을 구분해 배울 근거가 없지만, 라벨은 MITRE대로 따로 둔다 (L1).
 
@@ -199,14 +217,16 @@ BOTS v3는 Splunk 인덱스 버킷(`rawdata/journal.gz`)에서 CloudTrail JSON�
 - `userAgent` (Stratus는 `stratus-red-team_...`, 도구 종류로 일반화해도 Stratus는 전부 `sdk-go`라 제거)
 - 사용자·리소스 이름 (`stratus-red-team-...`, `rhino_escalate`, `cloudsploit` 등) → 세션 안 가명
 - 리전 (Stratus는 가짜 리전) → `region_changed`만
-- IP, `ip_kind`, 세션, 시간 → 정렬·분할에만 쓰고 버림 (`src/windows.py`의 `model_input`)
-- `readOnly`가 없는 옛 CloudTrail(BOTS v3)은 API 이름으로 읽기/쓰기를 추정한다 (문장 변환 단계)
+- IP, `ip_kind`, 세션, 시간 → 정렬·분할에만 쓰고 모델 입력에는 넣지 않음
+- `readOnly`가 없는 옛 CloudTrail(BOTS v3)은 API 이름으로 읽기/쓰기를 채운다 (`preprocess.ipynb`). 비어 있으면 소스에 따라 값이 달라져 단서가 되기 때문
 
 ## 10. 남은 일
 
-- [ ] 문장 변환, 분할, k-shot·평가 파일 (전술용, 기법용, 전술 + 기법용)
-- [ ] 평가에서 공격 판정을 "1등이 BENIGN이 아니면"에서 "공격 라벨이 하나라도 임계값을 넘으면"으로 (L6 때문에)
+- [x] 분할, k-shot·평가 파일 (전술용, 기법용, 전술 + 기법용) → `04_split_v2`
+- [x] 평가 공격 판정을 "공격 라벨이 하나라도 임계값을 넘으면"으로 (L6 때문에) → `finetuning.ipynb`
+- [x] 전술 + 기법 방식은 추론·채점을 전술과 기법으로 나눠서 → `finetuning.ipynb`
+- [ ] 문장 변환 (지금은 `text`에 `signature`를 넣음)
 - [ ] 상위 기법만 있는 윈도우(T1098 삭제 등)에서 하위 기법을 오답으로 학습하지 않게 할지 (GLiClass `train.py`는 "모름"을 지원하지 않음)
-- [ ] v19 표의 전술 이름(TA0005 Stealth, TA0112 Defense Impairment) 출처 확인
+- [ ] 전술 이름(TA0005 Stealth, TA0112 Defense Impairment) 출처 확인 (v19 표 기준)
 - [ ] Credential Access 데이터 보강 (B 13개)
-- [ ] `labels/build_labels.py`가 읽는 규칙 파일(`attack_labels_v19.csv`, `stratus_mapping.csv`, `splunk_rules.csv`, `botsv3_rules.csv`)이 저장소에 없음. 이벤트 라벨을 다시 만들려면 이 문서의 표로 복구해야 함
+- [ ] val·test가 1~3개뿐인 학습 라벨의 숨김 기준 ("0개"보다 높일지)
