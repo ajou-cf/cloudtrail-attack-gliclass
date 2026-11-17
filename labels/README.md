@@ -5,11 +5,15 @@ CloudTrail 원본 로그에서 학습용 윈도우 라벨까지, 라벨이 붙�
 ```
 라벨 체계            labels/labels.csv              전술·기법 ID, 상위 관계, 라벨 문장, 기본 역할 (기준 파일)
 ① 이벤트 라벨        notebooks/01_build_labels.ipynb → data/interim/event_labels.csv   (labels/build_labels.py도 같은 결과)
-② 전처리·압축 (A/B)   notebooks/preprocess.ipynb      → data/interim/events_{A,B}.csv
-③ 윈도우 분할·라벨    notebooks/window.ipynb          → data/interim/windows_{A,B}_size5_stride1.csv
+② 전처리·압축 (A/B)   notebooks/preprocess.ipynb      → data/interim/events_{A,B}.csv   (B: 이벤트 반복 압축)
+③ 윈도우 분할·라벨    notebooks/window.ipynb          → data/interim/windows_{A,B}_size5_stride1.csv   (A: 같은 내용 윈도우 병합)
 ④ 분할·학습 파일      notebooks/04_split_v2.ipynb     → data/v2/{A,B}_{tactic,technique,both}_k{k}/
-⑤ 파인튜닝            notebooks/finetuning.ipynb
+⑤ 파인튜닝            notebooks/finetuning.ipynb      (설정 하나의 학습·평가 코드)
+   ├ 큐로 돌리기      notebooks/06_finetune_queue.ipynb   A·B × 방식 × k 1~16 × 학습률을 차례로 (Colab 백그라운드)
+   └ 하나만 돌리기    notebooks/06_finetune_single.ipynb  설정 하나 + 결과 표·그래프
 ```
+
+주의: `04_split_v2.ipynb`는 실행할 때 `data/v2/` 아래 폴더를 **결과(`results/`)까지 지우고** 다시 만든다. 파인튜닝 결과가 있으면 출력 폴더를 바꿔 만든 뒤 `splits/`와 `labels.csv`만 옮긴다.
 
 ## 라벨 체계 (`labels/labels.csv`)
 
@@ -39,9 +43,9 @@ techniques = ['T1078', 'T1078.004', 'T1580']                      # 기법 + 그
 labels     = ['BENIGN']
 techniques = ['BENIGN']
 
-# 같은 내용이 정상에도 공격에도 나온 윈도우 (합집합)
-labels     = ['BENIGN', 'TA0001', 'TA0003', 'TA0004', 'TA0005']
-techniques = ['BENIGN', 'T1078', 'T1078.004']
+# 같은 내용이 정상에도 공격에도 나온 윈도우: 공격 라벨만 (dup_n_benign에 정상 윈도우 수를 남김)
+labels     = ['TA0001', 'TA0003', 'TA0004', 'TA0005']
+techniques = ['T1078', 'T1078.004']
 ```
 
 | # | 규칙 |
@@ -51,7 +55,7 @@ techniques = ['BENIGN', 'T1078', 'T1078.004']
 | L3 | 기법은 **하위 기법과 그 상위 기법을 함께** 붙인다 (예: T1098.001 → `T1098`, `T1098.001`). 하위 기법이 없으면 그 기법만 붙는다. |
 | L4 | 기법 ID는 **MITRE ID만** 쓴다. 상위 기법으로만 라벨된 데이터는 이벤트를 보고 확실하면 하위 기법으로 고친다 (3절). |
 | L5 | 윈도우 라벨은 윈도우 안 공격 이벤트들의 전술·기법 **합집합**이다 (방식 1). 공격 이벤트가 없으면 `BENIGN`. |
-| L6 | 모델 입력 내용(`signature`)이 같은 윈도우는 하나로 합치고 라벨은 **합집합**으로 붙인다. 정상과 공격이 섞여도 `{BENIGN, 공격}`으로 남긴다. "이 패턴만으로는 정상일 수도, 공격일 수도 있다"를 학습시킨다 (6절). |
+| L6 | 모델 입력 내용(`signature`)이 같은 윈도우는 하나로 합치고 라벨은 **합집합**으로 붙인다. 정상 윈도우와 공격 윈도우가 섞인 묶음은 **공격 라벨만** 붙인다 (L5와 같은 규칙. B의 이벤트 압축은 공격·정상을 합치지 않으므로 A·B 규칙이 같아진다). 섞인 정보는 `dup_n_benign`에 남긴다 (6절). |
 | L7 | 라벨이 붙은 윈도우는 지우지 않는다. 데이터가 적은 전술은 학습 대신 **시험 전용(제로샷 평가)**으로 둔다 (7절). |
 
 ---
@@ -163,7 +167,7 @@ BOTS v3는 Splunk 인덱스 버킷(`rawdata/journal.gz`)에서 CloudTrail JSON�
 - 공격과 정상, 서로 다른 공격 실행은 합치지 않는다.
 - 지금 데이터에서는 `attack_id`를 빼도 라벨이 섞이는 묶음이 0개다. 라벨이 "세션 + API" 또는 "주체" 기준으로 붙어 있어서, 같은 주체의 같은 호출이 다른 라벨을 가질 수 없다. 정상 흐름에 공격을 끼워 넣은 데이터가 들어오면 이 조건이 실제로 작동하므로, 그때는 라벨 없이 압축하고 묶음 라벨을 합집합으로 정해야 한다.
 
-버전 A는 압축하지 않는다.
+버전 A는 이벤트 반복 압축을 하지 않는 대신, 윈도우로 나눈 **뒤** 내용이 같은 윈도우를 하나로 합친다 (5절, L6). 두 버전은 압축하는 단계와 방식이 다르다: A = 윈도우 병합, B = 이벤트 반복 압축(+ 윈도우 병합).
 
 ## 5. 윈도우 라벨 (`src/windows.py` → `04_split_v2` 2번)
 
@@ -181,12 +185,12 @@ BOTS v3는 Splunk 인덱스 버킷(`rawdata/journal.gz`)에서 CloudTrail JSON�
 |---|---|---|
 | 기법만 다름 (예: T1526 vs T1580) | 첫 윈도우의 기법만 남김 | **합집합** (`T1526`, `T1580`) |
 | 전술이 다름 (예: Execution vs Credential Access) | 삭제 | **합집합** |
-| 정상과 공격 | 삭제 | **합집합** (`BENIGN` + 공격) |
+| 정상과 공격 | 삭제 | **공격 라벨만** (`BENIGN` 빼기, 정상 윈도우 수는 `dup_n_benign`) |
 | 제외 라벨이 붙음 | 삭제 | **남김** (7절) |
 
 대표 윈도우는 처음 나온 것(세션, 윈도우 번호 순)이고, 분할 때 그 세션·위치를 쓴다.
 
-결과: A 28,387 → 9,287, B 8,183 → 7,733. 라벨이 합집합으로 바뀐 묶음 A 84, B 46. `{BENIGN, 공격}` A 2. (`window.ipynb`의 `u_tactics`, `u_techniques`, `is_first`)
+결과: A 28,387 → 9,287, B 8,183 → 7,733. 라벨이 합집합으로 바뀐 묶음 A 84, B 46. 정상과 공격이 섞인 묶음 A 2, B 0 (공격 라벨만 붙임). (`window.ipynb`의 `u_tactics`, `u_techniques`, `is_first`, `dup_n_attack`, `dup_n_benign`)
 
 ## 7. 라벨 역할 (분할할 때, `04_split_v2`)
 

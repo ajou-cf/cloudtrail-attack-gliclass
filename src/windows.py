@@ -4,7 +4,7 @@
 기본 정책: 크기 5, stride 1, 방식 1(label_any_attack). 방식 2 라벨(m2_*)은 비교용으로 같이 저장한다.
 
 버전 (notebooks/preprocess.ipynb 참고)
-  A: 압축 안 한 이벤트(events_A.csv)를 분할한 뒤, 내용이 같은 윈도우를 합친다
+  A (윈도우 병합): 반복 압축 전 이벤트(events_A.csv)를 분할한 뒤, 내용이 같은 윈도우를 합친다
   B: 반복 압축한 이벤트(events_B.csv)를 분할한다
 
 두 버전 모두 윈도우를 지우지 않고 중복 정보만 표시한다.
