@@ -5,15 +5,17 @@ CloudTrail 원본 로그에서 학습용 윈도우 라벨까지, 라벨이 붙�
 ```
 라벨 체계            labels/labels.csv              전술·기법 ID, 상위 관계, 라벨 문장, 기본 역할 (기준 파일)
 ① 이벤트 라벨        notebooks/01_build_labels.ipynb → data/interim/event_labels.csv   (labels/build_labels.py도 같은 결과)
+   └ 검증·대안 라벨  notebooks/01_traildiscover_labels.ipynb → labels/traildiscover_check.md, data/interim/event_labels_td.csv (eventName 기반, TrailDiscover)
 ② 전처리·압축 (A/B)   notebooks/preprocess.ipynb      → data/interim/events_{A,B}.csv   (B: 이벤트 반복 압축)
 ③ 윈도우 분할·라벨    notebooks/window.ipynb          → data/interim/windows_{A,B}_size5_stride1.csv   (A: 같은 내용 윈도우 병합)
 ④ 분할·학습 파일      notebooks/04_split_v2.ipynb     → data/v2/{A,B}_{tactic,technique,both}_k{k}/
+   └ 점수 라벨      notebooks/04_soft_labels.ipynb  → data/v2/{A,B}-soft_*_k{k}/ (학습 파일만 {라벨: 점수}, 분할·평가는 v2와 같음)
 ⑤ 파인튜닝            notebooks/finetuning.ipynb      (설정 하나의 학습·평가 코드)
    ├ 큐로 돌리기      notebooks/06_finetune_queue.ipynb   A·B × 방식 × k 1~16 × 학습률을 차례로 (Colab 백그라운드)
    └ 하나만 돌리기    notebooks/06_finetune_single.ipynb  설정 하나 + 결과 표·그래프
 ```
 
-주의: `04_split_v2.ipynb`는 실행할 때 `data/v2/` 아래 폴더를 **결과(`results/`)까지 지우고** 다시 만든다. 파인튜닝 결과가 있으면 출력 폴더를 바꿔 만든 뒤 `splits/`와 `labels.csv`만 옮긴다.
+주의: `04_split_v2.ipynb`는 실행할 때 `data/v2/` 아래 폴더를 **결과(`results/`)까지 지우고** 다시 만든다. `*-soft_*` 폴더도 함께 지워지므로 그 뒤에 `04_soft_labels.ipynb`를 다시 돌린다. 파인튜닝 결과가 있으면 출력 폴더를 바꿔 만든 뒤 `splits/`와 `labels.csv`만 옮긴다.
 
 ## 라벨 체계 (`labels/labels.csv`)
 
@@ -230,7 +232,33 @@ BOTS v3는 Splunk 인덱스 버킷(`rawdata/journal.gz`)에서 CloudTrail JSON�
 - [x] 평가 공격 판정을 "공격 라벨이 하나라도 임계값을 넘으면"으로 (L6 때문에) → `finetuning.ipynb`
 - [x] 전술 + 기법 방식은 추론·채점을 전술과 기법으로 나눠서 → `finetuning.ipynb`
 - [ ] 문장 변환 (지금은 `text`에 `signature`를 넣음)
+- [ ] TrailDiscover 검증 결과 반영 여부 (`labels/traildiscover_check.md`): 시나리오 기준 공격 라벨 8,695개 중 eventName 기법과 일치·상위하위 일치 15%. eventName 기반 라벨(`event_labels_td.csv`)로 바꿀지 결정
 - [ ] 상위 기법만 있는 윈도우(T1098 삭제 등)에서 하위 기법을 오답으로 학습하지 않게 할지 (GLiClass `train.py`는 "모름"을 지원하지 않음)
 - [ ] 전술 이름(TA0005 Stealth, TA0112 Defense Impairment) 출처 확인 (v19 표 기준)
 - [ ] Credential Access 데이터 보강 (B 13개)
 - [ ] val·test가 1~3개뿐인 학습 라벨의 숨김 기준 ("0개"보다 높일지)
+
+## 11. 점수 라벨 (`04_soft_labels.ipynb`, 학습 파일만)
+
+GLiClass 학습 파일 `true_labels`를 `{라벨 문장: 점수}`로 준다. 없는 라벨 0, `-100`은 손실에서 빠짐 (모름). 검증·시험 정답은 0/1 그대로.
+
+| 경우 | 점수 |
+|---|---|
+| Splunk 공격 (데이터셋 기법), Stratus 공격, BOTS v3 공격 중 TrailDiscover와 일치 | 1 |
+| BOTS v3 공격 중 TrailDiscover와 불일치 | 0.7 |
+| Stratus 보조 호출 (`helper_call`) | 0.5 |
+| TrailDiscover 검증 기법 (추가분) | 0.5 |
+| TrailDiscover 미검증 후보 (추가분) | 0.2 |
+| 1 미만 기법의 하위 기법 중 점수 없는 것 | -100 |
+
+같은 라벨은 큰 값, 상위 기법 = 하위 기법 최댓값, 전술 = 기법 최댓값. 윈도우·병합은 라벨마다 1 → -100 → 소프트 최댓값 → 0. 공격이 있으면 `BENIGN` 뺌. 근거: 부분 라벨 마스킹 (Durand et al., CVPR 2019), 약한 감독 확률 라벨 (Ratner et al., NeurIPS 2016), 계층 일관성 (Giunchiglia & Lukasiewicz, NeurIPS 2020).
+
+**채점 (검증·시험)**: 점수가 1인 라벨만 정답. 점수가 1이 아닌 라벨(0.7·0.5·0.2·-100) 칸은 `ignore`로 표시해 F1·AP·임계값·에폭 고르기에서 뺀다 (`finetuning_soft.ipynb`). 공격 판정 정답은 `is_attack`(윈도우에 공격 이벤트가 있나). 점수 1 기준으로 세어 숨김 규칙을 다시 적용해도 역할이 바뀌는 라벨은 없다 (2026-11-20 확인).
+
+| 폴더 | 학습 파일 | 채점 |
+|---|---|---|
+| `data/v2/{A,B}_*` | 0/1 | 전체 칸 (`finetuning.ipynb`, `finetuning_model.ipynb`) |
+| `data/v2/{A,B}-mask_*` | 0/1 (v2와 같음) | 확실한 칸만 |
+| `data/v2/{A,B}-soft_*` | 점수 라벨 | 확실한 칸만 |
+
+`-mask`와 `-soft`는 분할·k-shot 예시·검증·시험 파일이 같고 학습 라벨만 다르다. 점수 라벨의 효과는 이 둘을 비교한다.
